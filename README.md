@@ -1,36 +1,51 @@
-﻿# SecureBank Core Transaction Engine
+# SecureBank Core Transaction Engine
 
-A robust, enterprise-grade core banking transaction engine built in **C++** and powered by an embedded relational database (**SQLite**). This project is designed to demonstrate deep proficiency in **Core Computer Science fundamentals**, specifically **Object-Oriented Programming (OOP) design patterns** and **Relational Database Management System (DBMS) ACID compliance**.
+A C++17 banking transaction engine backed by an embedded SQLite3 database. Built to practice and demonstrate object-oriented design patterns, RAII resource management, and ACID transaction handling.
 
----
+## Features
 
-## 🚀 Key Features
+- **Object-Oriented Domain Model:**
+  - Abstract `Account` base class with `SavingsAccount` and `CurrentAccount` implementations.
+  - Polymorphic withdrawal validation (`canWithdraw`) and interest calculation (`calculateInterest`):
+    - `SavingsAccount`: enforces a Rs. 1,000 minimum balance requirement and 4.5% annual interest.
+    - `CurrentAccount`: zero minimum balance with a Rs. 1,00,000 per-transaction limit.
+- **Design Patterns & C++ Idioms:**
+  - **Factory Pattern (`AccountFactory`):** Instantiates `SavingsAccount` or `CurrentAccount` objects from database records.
+  - **Singleton Pattern (`DatabaseManager`):** Manages the SQLite connection with `std::mutex` synchronization and WAL (`Write-Ahead Logging`) mode enabled.
+  - **RAII Wrappers (`ScopedStatement`, `TransactionGuard`):** Automatically finalizes prepared statements (`sqlite3_stmt`) and rolls back uncommitted transactions if an error or exception occurs.
+- **Database Integrity & ACID Compliance:**
+  - Normalized 3NF schema (`Users`, `Accounts`, `Transactions`) with foreign key constraints, `CHECK` constraints, and B-Tree indexes.
+  - Uses parameterized prepared statements (`sqlite3_prepare_v2` / `sqlite3_bind_*`) for all queries.
+  - Uses `BEGIN IMMEDIATE TRANSACTION` to prevent lock upgrade deadlocks (`SQLITE_BUSY`) during concurrent transfers.
 
-* **Strict Object-Oriented Architecture:** Implements core OOP pillars including encapsulation, inheritance (`Account` base class with `SavingsAccount` and `CurrentAccount` derivatives), and runtime polymorphism.
-* **Design Patterns in Action:** 
-  * **Factory Pattern (`AccountFactory`):** Dynamically instantiates specific account types based on runtime parameters.
-  * **Singleton Pattern (`DatabaseManager`):** Manages a secure, thread-safe single connection pool to the underlying database engine.
-* **DBMS & ACID Compliance:** 
-  * Features a fully normalized **3NF relational database schema** containing `Users`, `Accounts`, and `Transactions` tables.
-  * Enforces database integrity using **Foreign Key constraints**, **ON DELETE CASCADE**, and **CHECK constraints** to prevent negative account balances.
-  * Implements **explicit transaction boundaries (`BEGIN TRANSACTION`, `COMMIT`, `ROLLBACK`)** to guarantee atomicity and prevent data corruption during fund transfers.
+## Tech Stack
 
----
+- **Language:** C++17
+- **Database:** SQLite3
+- **Build:** Make / `g++`
 
-## 🛠️ Tech Stack
-
-* **Language:** C++ (Standard 17/20)
-* **Database:** SQLite3 (Embedded Relational DBMS)
-* **Version Control:** Git & GitHub
-
----
-
-## 📂 Project Structure
+## Project Structure
 
 ```text
 SecureBank-Core-Engine/
-│
-├── main.cpp          # Application driver, OOP domain models, and transaction engine
-├── sqlite3.c         # SQLite database engine source
-├── sqlite3.h         # SQLite header file
-└── README.md         # Project documentation
+├── main.cpp          # Domain models, RAII wrappers, transaction engine, and test driver
+├── sqlite3.c         # SQLite3 amalgamation source
+├── sqlite3.h         # SQLite3 header
+├── Makefile          # Build configuration
+└── README.md
+```
+
+## Build & Run
+
+Using Make:
+```bash
+make
+./secure_bank
+```
+
+Or compile directly with `g++`:
+```bash
+gcc -O2 -c sqlite3.c -o sqlite3.o
+g++ -std=c++17 -Wall -Wextra -O2 -pthread main.cpp sqlite3.o -lpthread -ldl -o secure_bank
+./secure_bank
+```
