@@ -138,3 +138,4 @@ Covers: successful transfers, all rejection cases, atomicity via trigger-based c
 ## Possible Extensions
 
 REST API layer · Role-based access · Idempotency keys · Scheduled interest job · Currency support
+
