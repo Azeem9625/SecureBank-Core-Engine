@@ -1,97 +1,102 @@
-# SecureBank Core Transaction Engine
+# SecureBank — Core Transaction Engine
 
-![CI](../../actions/workflows/ci.yml/badge.svg)
-
-A core-banking transaction engine written in **C++17** on top of embedded **SQLite**.
-It is a learning project built to apply two core CS subjects in one place:
-
-* **OOP** – abstraction, inheritance, runtime polymorphism, Factory and Singleton patterns, RAII
-* **DBMS** – ACID transactions, normalised schema, integrity constraints, prepared statements
-
-> This is a portfolio / learning project, not production banking software
-> (see [Limitations](#limitations)).
+A banking transaction engine built in **C++17** using embedded **SQLite**. The goal was to combine two subjects — **OOP** and **DBMS** — into one real project instead of keeping them separate.
 
 ---
 
-## Features
+## Tech Stack
 
-| Area | What is implemented |
-|------|---------------------|
-| **OOP** | Abstract `Account` base class; `SavingsAccount` and `CurrentAccount` override pure virtual rules (minimum balance, per-transfer limit, monthly interest). The engine talks only to `Account*` – runtime polymorphism. |
-| **Factory** | `AccountFactory` builds the correct subclass from the `account_type` string stored in the DB. |
-| **Singleton** | `DatabaseManager` owns the single SQLite connection (thread-safe lazy initialisation). |
-| **RAII** | `Statement` (auto-finalizes prepared statements) and `SqlTransaction` (auto-`ROLLBACK` unless `commit()` is reached). |
-| **ACID transfers** | `transferFunds` runs debit + credit + audit row inside one `BEGIN IMMEDIATE … COMMIT` block. Any failure rolls everything back. |
-| **Deposit / Withdraw** | `deposit` and `withdraw` are first-class operations. Each respects per-transfer limits and minimum-balance rules, and is logged with its own `transaction_type`. |
-| **Account management** | `createUser` and `createAccount` let you build new customers and accounts at runtime (with input validation and DB-enforced uniqueness). |
-| **Interest posting** | `postMonthlyInterest` actually credits 4 % p.a. / 12 to every Savings account in a single atomic transaction and logs each posting as `INTEREST` type. |
-| **Transaction history** | `getTransactionHistory(accountId)` returns a typed `TransactionRecord` vector for per-account statement generation. |
-| **Integrity** | `CHECK (balance_paise >= 0)`, `CHECK (amount_paise > 0)`, `UNIQUE(email)`, foreign keys (enforced via `PRAGMA foreign_keys = ON`), account-type `CHECK`, transaction-type `CHECK`. |
-| **Money safety** | All amounts are stored as **integer paise** – no floating-point rounding errors. |
-| **Security** | Every SQL value is passed through bound parameters (`sqlite3_bind_*`) – no string-built SQL, so no SQL injection. |
-| **Audit trail** | Every attempted operation (transfer, deposit, withdrawal, interest) is stored in `Transactions` with its `transaction_type`, `status` (`SUCCESS` / `FAILED`), and a `failure_reason`. |
-| **Concurrency** | Whole transactions are serialised by a mutex (one shared connection) and by SQLite's write lock (`BEGIN IMMEDIATE`). |
-| **Tests** | 32 unit tests covering all APIs, run under ASan / UBSan / TSan during development. |
+- **Language:** C++17
+- **Database:** SQLite (bundled amalgamation, no external install needed)
+- **Build:** CMake 3.10+
+- **CI:** GitHub Actions (build + tests on every push)
 
-## Database schema (3NF)
+---
+
+## What's Implemented
+
+### OOP Concepts
+- Abstract base class `Account` with pure virtual methods
+- `SavingsAccount` and `CurrentAccount` override rules (minimum balance, transfer limit, interest)
+- `BankEngine` only talks to `Account*` — runtime polymorphism, no type-checking `if` chains
+- **Factory Pattern** — `AccountFactory` builds the right subclass from a DB string
+- **Singleton** — `DatabaseManager` holds one SQLite connection, thread-safe lazy init
+- **RAII** — `Statement` auto-finalizes prepared statements; `SqlTransaction` auto-rollbacks on any exception
+
+### DBMS Concepts
+- Schema is in **3NF** — no redundant data across tables
+- `ACID` transfers: `BEGIN IMMEDIATE` + mutex so debit, credit, and audit row are always atomic
+- `CHECK` constraints enforce non-negative balances and valid enums at the DB level
+- `FOREIGN KEY` with `PRAGMA foreign_keys = ON` (SQLite has this off by default)
+- `PRAGMA journal_mode = WAL` so readers don't block the writer
+- Parameterized queries everywhere — no string-concatenated SQL, so no SQL injection possible
+- All money stored as **integer paise** (not `double`) to avoid floating-point rounding errors
+
+### APIs
+| Method | What it does |
+|--------|-------------|
+| `transferFunds(src, dst, amount)` | ACID fund transfer between two accounts |
+| `deposit(accountId, amount)` | Cash deposit into an account |
+| `withdraw(accountId, amount)` | Cash withdrawal, respects minimum balance |
+| `createUser(firstName, lastName, email)` | Register a new customer |
+| `createAccount(userId, type, balance)` | Open a Savings or Current account |
+| `postMonthlyInterest()` | Credits 4% p.a./12 to all Savings accounts |
+| `getTransactionHistory(accountId)` | Per-account statement as a typed vector |
+
+---
+
+## Database Schema
 
 ```
-Users(user_id PK, first_name, last_name, email UNIQUE)
-   │ 1
-   │ ── N  (ON DELETE CASCADE)
-Accounts(account_id PK, user_id FK, account_type CHECK IN ('Savings','Current'),
-         balance_paise CHECK >= 0)
-   │ 1
-   │ ── N  (no cascade: an account with history can't be deleted)
-Transactions(transaction_id PK, source_account_id FK NULL, destination_account_id FK NULL,
-             amount_paise CHECK > 0,
-             transaction_type CHECK IN ('TRANSFER','DEPOSIT','WITHDRAWAL','INTEREST'),
-             status CHECK IN ('SUCCESS','FAILED'),
-             failure_reason, timestamp)
+Users
+  user_id  PK | first_name | last_name | email UNIQUE
+     |
+     | 1──N (ON DELETE CASCADE)
+     |
+Accounts
+  account_id PK | user_id FK | account_type CHECK('Savings','Current') | balance_paise CHECK(>=0)
+     |
+     | 1──N (no cascade — financial history must never disappear)
+     |
+Transactions
+  transaction_id PK | source_account_id FK NULL | destination_account_id FK NULL
+  amount_paise CHECK(>0) | transaction_type CHECK('TRANSFER','DEPOSIT','WITHDRAWAL','INTEREST')
+  status CHECK('SUCCESS','FAILED') | failure_reason | timestamp
 ```
 
-Each fact is stored once and every non-key column depends only on its table's key (no partial or
-transitive dependencies). Customer data is not repeated in `Accounts` or `Transactions`.
+**Why `transaction_type` column?** — Deposits have no source, withdrawals have no destination, interest postings have no source. A single type column makes the audit log self-explanatory without needing separate tables.
 
-### transaction_type semantics
+---
 
-| type | source | destination |
-|------|--------|-------------|
-| `TRANSFER` | sending account | receiving account |
-| `DEPOSIT` | NULL (cash enters system) | credited account |
-| `WITHDRAWAL` | debited account | NULL (cash leaves system) |
-| `INTEREST` | NULL (interest earned) | credited Savings account |
+## Account Rules
 
-## Transfer rules
-
-A transfer / withdrawal is rejected (balances unchanged) when:
-
-1. the amount is `<= 0`, or source and destination are the same account
-2. the source or destination account does not exist
-3. the amount exceeds the account type's per-transfer limit
-4. the source would drop below its minimum balance
-
-| | Savings | Current |
-|---|---|---|
-| Minimum balance | Rs. 500 | none |
+|  | Savings | Current |
+|--|---------|---------|
+| Minimum balance | Rs. 500 | None |
 | Per-transfer limit | Rs. 50,000 | Rs. 5,00,000 |
-| Interest | 4 % p.a. | none |
+| Monthly interest | 4% p.a. / 12 | None |
 
-Rejections caused by business rules (3, 4, and missing accounts) are logged as `FAILED` in the audit trail.
+A transfer or withdrawal is rejected (and logged as `FAILED`) if:
+- Amount ≤ 0, or source == destination
+- Account does not exist
+- Amount exceeds the per-transfer limit
+- Balance would drop below the minimum
 
-## Build & run
+---
 
-Requires a C++17 compiler (g++ / clang++ / MSVC). SQLite is bundled (`sqlite3.c`, `sqlite3.h`).
+## Build & Run
 
-**With CMake**
+SQLite is bundled — no external dependencies.
+
+**With CMake:**
 ```bash
 cmake -S . -B build
 cmake --build build
-./build/securebank            # demo
-ctest --test-dir build        # unit tests
+./build/securebank          # demo
+ctest --test-dir build      # run all 32 tests
 ```
 
-**Without CMake** (g++/MinGW) – note that `sqlite3.c` is C, so compile it with `gcc`, not `g++`:
+**Without CMake (MinGW on Windows, drop `-ldl`):**
 ```bash
 gcc -c sqlite3.c -o sqlite3.o
 g++ -std=c++17 main.cpp  sqlite3.o -o securebank       -ldl -lpthread
@@ -99,71 +104,37 @@ g++ -std=c++17 tests.cpp sqlite3.o -o securebank_tests -ldl -lpthread
 ./securebank
 ./securebank_tests
 ```
-(On Windows/MinGW drop `-ldl`.)
 
-## Sample output (abridged)
+---
 
-```
---- Cash deposits ---
-  [OK]       Deposit Rs. 10000.00 -> account #3
-             -> Deposited Rs. 10000.00 to account #3.
-  [REJECTED] Deposit Rs.     0.00 -> account #1 (invalid amount)
-             -> Deposit amount must be greater than zero.
-
---- Fund transfers ---
-  [OK]       1 -> 2 : Rs. 1500.00
-             -> Transferred Rs. 1500.00 from account #1 to account #2.
-  [REJECTED] 1 -> 2 : Rs. 3100.00 (would break Rs. 500 minimum)
-             -> Insufficient funds (a minimum balance of Rs. 500.00 must remain in the account).
-
---- Cash withdrawals ---
-  [OK]       Withdraw Rs. 5000.00 from account #2 (Current, no minimum)
-             -> Withdrew Rs. 5000.00 from account #2.
-  [REJECTED] Withdraw Rs. 9600.00 from account #3 (Savings minimum enforced)
-             -> Insufficient funds (a minimum balance of Rs. 500.00 must remain).
-
---- Monthly interest posting ---
-  Total interest credited across all Savings accounts: Rs. 50.16
-
---- Transaction history for account #1 ---
-  #2 | ? -> 1 | Rs. 1500.00 | TRANSFER | SUCCESS
-  #4 | 1 -> 2 | Rs. 1500.00 | TRANSFER | SUCCESS
-  ...
-```
-
-## Project structure
+## Project Structure
 
 ```
-securebank.hpp   Engine: RAII wrappers, Singleton, Account hierarchy, Factory, BankEngine
-main.cpp         Demo driver
-tests.cpp        32 dependency-free unit tests
-CMakeLists.txt   Build + ctest
-sqlite3.c/.h     SQLite amalgamation (public domain)
+securebank.hpp    — entire engine (RAII, Singleton, OOP hierarchy, Factory, BankEngine)
+main.cpp          — demo driver
+tests.cpp         — 32 unit tests (no external framework)
+CMakeLists.txt    — build config + ctest
+sqlite3.c / .h    — SQLite amalgamation (public domain)
+.github/workflows/ci.yml — CI pipeline
 ```
 
-## Design decisions
+---
 
-* **Integer paise instead of `double`** – binary floating point cannot represent values like 0.1 exactly.
-* **`BEGIN IMMEDIATE`** – the transfer reads a balance and then updates it; taking the write lock first
-  prevents another writer from changing the balance in between.
-* **RAII transaction guard** – rollback happens automatically on every error path.
-* **Business rules live in the subclasses** – the engine never checks "if Savings …"; adding a new
-  account type means one new class and one line in the factory.
-* **No `ON DELETE CASCADE` on `Transactions`** – financial history must never disappear silently.
-* **`transaction_type` column** – the DB `CHECK` constraint enforces only valid types at the storage
-  level, decoupling the application enum from raw SQL strings.
-* **Cursor closed before writes in `postMonthlyInterest`** – all Savings account rows are fetched into
-  a `std::vector` first, then the SELECT `Statement` is finalized, before any `UPDATE`/`INSERT` runs
-  inside the same transaction. This avoids holding an open read cursor across write operations.
+## Tests (32 total)
+
+Covers: successful transfers, all rejection cases, atomicity via trigger-based crash simulation, DB `CHECK` constraint enforcement, FK protection, Factory validation, polymorphic rule checks, integer money math, 300-iteration money conservation, 4-thread concurrent transfer safety, deposit/withdraw APIs, `createUser`/`createAccount` input validation, duplicate email rejection, monthly interest math, and per-account transaction history.
+
+---
 
 ## Limitations
 
-* Single process, single shared connection (not a connection pool).
-* No authentication / authorisation, no REST or UI layer – it is an engine plus a demo.
-* No currency conversion.
-* Interest is calculated per account individually; there is no batch-rounding reconciliation step.
+- Single SQLite connection (no connection pool)
+- No REST API or UI — engine + demo only
+- No authentication or role-based access
+- Interest is calculated per account; no batch reconciliation step
 
-## Possible next steps
+---
 
-Deposit / withdraw ✅ | Interest posting ✅ | Account creation ✅ |
-REST API layer, role-based access control, idempotency keys for transfers, scheduled interest job.
+## Possible Extensions
+
+REST API layer · Role-based access · Idempotency keys · Scheduled interest job · Currency support
